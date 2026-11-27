@@ -32,7 +32,7 @@ video{display:block;width:100%;max-height:46vh;background:#000}
 #sel{position:absolute;top:0;bottom:0;border-top:3px solid var(--acc);border-bottom:3px solid var(--acc);box-shadow:0 0 0 100vmax rgba(10,10,16,.68)}
 .h{position:absolute;top:-3px;bottom:-3px;width:22px;background:var(--acc);touch-action:none;display:flex;align-items:center;justify-content:center}
 .h:after{content:"";width:3px;height:22px;border-radius:2px;background:var(--accink);opacity:.7}
-.h.l{left:-22px;border-radius:10px 0 0 10px}.h.r{right:-22px;border-radius:0 10px 10px 0}
+.h:before{content:"";position:absolute;inset:-8px -12px}.h.l{left:0;border-radius:8px 0 0 8px}.h.r{right:0;border-radius:0 8px 8px 0}
 .h.on{filter:brightness(1.15)}
 #ph{position:absolute;top:0;bottom:0;width:2px;background:#fff;left:0;pointer-events:none;opacity:.9}
 .info{display:flex;justify-content:space-between;align-items:baseline;color:var(--mute);font-size:14px;padding:0 4px}
@@ -134,33 +134,39 @@ function busy(t,p){$('#busy').hidden=t===null;if(t)$('#busyT').textContent=t;$('
 const once=(el,ev,ms=2500)=>new Promise(r=>{const f=()=>{el.removeEventListener(ev,f);r()};el.addEventListener(ev,f);setTimeout(f,ms)});
 
 /* ---------- carregar vídeo ---------- */
+async function warm(el){try{el.muted=true;await el.play();el.pause()}catch(e){}}
 $('#file').addEventListener('change',async e=>{
   const f=e.target.files[0]; e.target.value=''; if(!f)return;
   err('');
   if(f.size>300*1048576&&!confirm('Este vídeo é grande ('+Math.round(f.size/1048576)+' MB). O iPhone pode travar na conversão. Continuar?'))return;
   pause(); if(url)URL.revokeObjectURL(url);
-  src=f; url=URL.createObjectURL(f); v.src=url;
+  src=f; url=URL.createObjectURL(f); v.muted=true; v.src=url+'#t=0.001';
   busy('Abrindo vídeo…');
   await once(v,'loadedmetadata',8000);
+  await warm(v);
   busy(null);
   if(!isFinite(v.duration)||!v.duration){err('Não consegui ler este vídeo. Tente outro arquivo (MP4 ou MOV).');return}
   dur=v.duration; st=0; en=Math.min(dur,maxLen()); active='s'; setActive('s');
-  show('editor'); render(); thumbs();
+  show('editor'); render(); v.currentTime=0.001; thumbs();
 });
 $('#newv').onclick=()=>{pause();show('home')};
 
 async function thumbs(){
   const my=++token, N=10, strip=$('#strip'); strip.innerHTML='';
-  const t=document.createElement('video'); t.muted=true; t.playsInline=true; t.preload='auto'; t.src=url;
-  await once(t,'loadeddata',5000);
+  const t=document.createElement('video'); t.muted=true; t.setAttribute('playsinline',''); t.preload='auto';
+  t.style.cssText='position:fixed;left:-9999px;top:0;width:2px;height:2px;opacity:.01;pointer-events:none';
+  document.body.appendChild(t); t.src=url+'#t=0.001';
+  await once(t,'loadeddata',5000); await warm(t);
   const c=document.createElement('canvas'), x=c.getContext('2d');
   for(let i=0;i<N;i++){
-    if(my!==token)return;
+    if(my!==token){t.remove();return}
     t.currentTime=(i+.5)*dur/N; await once(t,'seeked',2500);
+    await new Promise(r=>setTimeout(r,80));
     const w=t.videoWidth||160,h=t.videoHeight||90, th=128, tw=Math.round(th*Math.min(w/h,1.2));
     c.width=tw;c.height=th; x.drawImage(t,0,0,tw,th);
     const im=new Image(); im.src=c.toDataURL('image/jpeg',.6); strip.appendChild(im);
   }
+  t.remove();
 }
 
 /* ---------- timeline ---------- */
@@ -187,12 +193,14 @@ $('#bm').onclick=()=>step(-1); $('#bp').onclick=()=>step(1);
 $('#max').onchange=()=>{if(en-st>maxLen())en=Math.min(dur,st+maxLen());render()};
 
 /* ---------- reprodução da seleção ---------- */
-function play(){
+async function play(){
   if(playing){pause();return}
   playing=true; $('#play').textContent='Pausar';
-  v.currentTime=st; v.muted=mode()!=='orig';
+  v.muted=mode()!=='orig';
+  v.currentTime=st; await once(v,'seeked',800);
+  if(!playing)return;
   if(audioFile){aud.currentTime=0;aud.play().catch(()=>{})}
-  v.play().catch(()=>pause());
+  try{await v.play()}catch(e){pause()}
 }
 function pause(){playing=false;v.pause();aud.pause();$('#play').textContent='Reproduzir seleção'}
 $('#play').onclick=play;
@@ -213,20 +221,27 @@ $('#rmAud').onclick=()=>{audioFile=null;aud.removeAttribute('src');$('#rmAud').h
 
 /* ---------- conversão (ffmpeg.wasm, local) ---------- */
 const loadScript=u=>new Promise((ok,no)=>{const s=document.createElement('script');s.src=u;s.onload=ok;s.onerror=()=>no(new Error('Falha ao carregar '+u+'. Verifique a internet na primeira vez.'));document.head.appendChild(s)});
-const FF='https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/umd/', UT='https://cdn.jsdelivr.net/npm/@ffmpeg/util@0.12.1/dist/umd/index.js', CORE='https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/umd/';
+const FF='https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/umd/', UT='https://cdn.jsdelivr.net/npm/@ffmpeg/util@0.12.1/dist/umd/index.js', CORE='https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/esm/';
 async function getFF(){
   if(ff)return ff;
   busy('Preparando o conversor (só na primeira vez)…');
   if(!window.FFmpegWASM)await loadScript(FF+'ffmpeg.js');
   if(!window.FFmpegUtil)await loadScript(UT);
-  const {toBlobURL}=FFmpegUtil, f=new FFmpegWASM.FFmpeg();
-  f.on('log',({message})=>{logs.push(message);if(logs.length>40)logs.shift()});
-  f.on('progress',({progress})=>busy('Convertendo…',clamp(progress,0,1)));
-  await f.load({
-    classWorkerURL:await toBlobURL(FF+'814.ffmpeg.js','text/javascript'),
-    coreURL:await toBlobURL(CORE+'ffmpeg-core.js','text/javascript'),
-    wasmURL:await toBlobURL(CORE+'ffmpeg-core.wasm','application/wasm')
-  });
+  const {toBlobURL}=FFmpegUtil;
+  const mk=()=>{const g=new FFmpegWASM.FFmpeg();
+    g.on('log',({message})=>{logs.push(message);if(logs.length>40)logs.shift()});
+    g.on('progress',({progress})=>busy('Convertendo…',clamp(progress,0,1)));return g};
+  const cls=await toBlobURL(FF+'814.ffmpeg.js','text/javascript');
+  let f=mk();
+  try{
+    await f.load({classWorkerURL:cls,
+      coreURL:await toBlobURL(CORE+'ffmpeg-core.js','text/javascript'),
+      wasmURL:await toBlobURL(CORE+'ffmpeg-core.wasm','application/wasm')});
+  }catch(e1){
+    logs.push('1ª tentativa falhou: '+(e1.message||e1));
+    f=mk();
+    await f.load({classWorkerURL:cls,coreURL:CORE+'ffmpeg-core.js',wasmURL:CORE+'ffmpeg-core.wasm'});
+  }
   return ff=f;
 }
 $('#make').onclick=async()=>{
